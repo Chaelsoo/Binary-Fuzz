@@ -1,4 +1,4 @@
-# KFuzz
+# Kfuzz
 
 Coverage-guided binary fuzzer built for CTF and black-box targets.
 
