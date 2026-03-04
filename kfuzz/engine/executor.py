@@ -48,7 +48,7 @@ class Executor:
 
     def _build_cmd(self) -> list:
         if self.qemu_mode:
-            return ["afl-qemu-trace", self.target]
+            return ["afl-qemu-trace", "--", self.target]
         return [self.target]
 
     def run(self, input_data: bytes, extra_env: dict | None = None) -> RunResult:
@@ -84,6 +84,13 @@ class Executor:
         rc = proc.returncode
 
         if rc >= 0:
+            # QEMU sometimes swallows crashes (heap overflows, certain signal types).
+            # Re-run natively to catch what QEMU missed.
+            if self.qemu_mode:
+                native = self._run_native(input_data)
+                if native.result == ExecResult.CRASH:
+                    native.exec_time_ms = elapsed
+                    return native
             return RunResult(
                 result=ExecResult.NORMAL,
                 exec_time_ms=elapsed,
@@ -109,3 +116,37 @@ class Executor:
             stdout=stdout,
             stderr=stderr,
         )
+
+    def _run_native(self, input_data: bytes) -> RunResult:
+        try:
+            proc: subprocess.Popen[bytes] = subprocess.Popen(
+                [self.target],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=_set_limits,
+                text=False,
+            )
+            try:
+                proc.communicate(input=bytes(input_data), timeout=self.timeout_sec)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                return RunResult(result=ExecResult.NORMAL)
+        except FileNotFoundError:
+            return RunResult(result=ExecResult.NORMAL)
+
+        rc = proc.returncode
+        if rc >= 0:
+            return RunResult(result=ExecResult.NORMAL)
+
+        sig_num = -rc
+        try:
+            sig = signal.Signals(sig_num)
+            sig_name: str = str(sig.name)
+        except ValueError:
+            sig = None
+            sig_name = f"SIG{sig_num}"
+
+        result = ExecResult.CRASH if (sig in CRASH_SIGNALS) else ExecResult.NORMAL
+        return RunResult(result=result, signal_num=sig_num, signal_name=sig_name)

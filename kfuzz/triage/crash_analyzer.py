@@ -45,21 +45,23 @@ def _classify(signal: str, fault_addr: Optional[int], backtrace: str, regs: dict
         return "Abort", "MEDIUM"
 
     if signal == "SIGSEGV":
-        if fault_addr is not None and fault_addr < 0x1000:
-            return "Null Pointer Dereference", "LOW"
         if any(w in bt for w in ("malloc", "free", "heap")):
             return "Heap Corruption", "HIGH"
         if any(w in bt for w in ("printf", "fprintf", "vprintf", "_io_")):
             return "Format String", "HIGH"
 
-        # RIP looks like 0x4141…, or RIP is very close to RSP (smashed return address)
         rip_val = _reg_int(regs, "rip")
         rsp_val = _reg_int(regs, "rsp")
         if rip_val is not None:
-            if rip_val > 0x4000000000000000:          # canonical user-space RIP blown out
+            if rip_val > 0x4000000000000000:
                 return "Stack Buffer Overflow", "HIGH"
             if rsp_val is not None and abs(rip_val - rsp_val) < 0x10000:
                 return "Stack Buffer Overflow", "HIGH"
+
+        # Null deref only if fault is near-zero AND stack looks clean
+        corrupted_frames = backtrace.count("in ?? ()")
+        if fault_addr is not None and fault_addr < 0x1000 and corrupted_frames < 2:
+            return "Null Pointer Dereference", "LOW"
 
         return "Stack Buffer Overflow", "HIGH"
 
@@ -138,7 +140,8 @@ def _stack_hash(frames: list[str]) -> str:
             m = re.search(r"(0x[0-9a-fA-F]+)", f)
             if m:
                 names.append(m.group(1))
-    return hashlib.sha1("|".join(names).encode()).hexdigest()[:12]
+    digest: str = hashlib.sha1("|".join(names).encode()).hexdigest()
+    return digest[:12]
 
 
 class CrashAnalyzer:
